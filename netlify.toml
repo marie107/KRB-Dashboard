@@ -1,0 +1,15 @@
+[build]
+  command   = "node build.js"
+  publish   = "public"
+  node_bundler = "none"
+
+[build.environment]
+  NODE_VERSION = "18"
+
+# Headers for security + caching
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "ALLOWALL"
+    X-Content-Type-Options = "nosniff"
+    Cache-Control = "public, max-age=1800, s-maxage=3600"

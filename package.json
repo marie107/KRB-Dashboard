@@ -1,0 +1,12 @@
+{
+  "name": "krb-rental-dashboard",
+  "version": "1.0.0",
+  "description": "KRB Rental Matrix Live Dashboard",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "test": "node build.js && echo 'Build OK'"
+  }
+}
