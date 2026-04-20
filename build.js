@@ -126,7 +126,7 @@ function computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, owner
   });
 
   const revProps = activeProps.filter(p => g(p, 'Revenue', 'checkbox') === true);
-  const occupied = revProps.filter(p => g(p, 'Resident Matrix', 'relation').length > 0);
+  const occupied = revProps.filter(p => g(p, 'Occupied Flag', 'formula') === true);
 
   const totalDoors    = activeProps.length;
   const availToRent   = revProps.length;
