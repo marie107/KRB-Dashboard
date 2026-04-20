@@ -17,6 +17,7 @@ const DB = {
   monthlyKPI:   '2d261a46-cdef-802d-b84c-d420aa2f8d47',
   dwor:         '39757054-7d11-47f6-9a02-fe930edf035e',
   ownerMatrix:  '2f161a46-cdef-809f-9ae0-f17fbdc7d0a6',
+  workOrders:   '34861a46-cdef-80ff-86f4-dc432b9a0279',
 };
 
 if (!NOTION_TOKEN) {
@@ -86,28 +87,32 @@ const g = (page, key, type = 'select') => P[type](page.properties?.[key]);
 
 // ── Main ─────────────────────────────────────────────────────
 async function build() {
-  console.log('[1/6] Fetching Rental Matrix from Notion…');
+  console.log('[1/7] Fetching Rental Matrix from Notion…');
   const rentalPages = await queryAllPages(DB.rentalMatrix);
   console.log(`      → ${rentalPages.length} records`);
 
-  console.log('[2/6] Fetching Weekly KPI from Notion…');
+  console.log('[2/7] Fetching Weekly KPI from Notion…');
   const weeklyPages = await queryAllPages(DB.weeklyKPI);
   console.log(`      → ${weeklyPages.length} records`);
 
-  console.log('[3/6] Fetching Monthly KPI from Notion…');
+  console.log('[3/7] Fetching Monthly KPI from Notion…');
   const monthlyPages = await queryAllPages(DB.monthlyKPI);
   console.log(`      → ${monthlyPages.length} records`);
 
-  console.log('[4/6] Fetching DWOR from Notion…');
+  console.log('[4/7] Fetching DWOR from Notion…');
   const dworPages = await queryAllPages(DB.dwor);
   console.log(`      → ${dworPages.length} records`);
 
-  console.log('[5/6] Fetching Owner Matrix from Notion…');
+  console.log('[5/7] Fetching Owner Matrix from Notion…');
   const ownerPages = await queryAllPages(DB.ownerMatrix);
   console.log(`      → ${ownerPages.length} records`);
 
-  console.log('[6/6] Computing metrics…');
-  const D = computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, ownerPages);
+  console.log('[6/7] Fetching Work Order Speed to Repair from Notion…');
+  const workOrderPages = await queryAllPages(DB.workOrders);
+  console.log(`      → ${workOrderPages.length} records`);
+
+  console.log('[7/7] Computing metrics…');
+  const D = computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, ownerPages, workOrderPages);
 
   fs.mkdirSync('public', { recursive: true });
   fs.writeFileSync('public/index.html', generateHTML(D), 'utf8');
@@ -115,7 +120,7 @@ async function build() {
 }
 
 // ── Metric computation ────────────────────────────────────────
-function computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, ownerPages) {
+function computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, ownerPages, workOrderPages) {
 
   // ── Rental Matrix ─────────────────────────────────────────
   // Field names in Notion Rental Matrix
@@ -329,6 +334,87 @@ function computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, owner
     else              ownerDist['6+ Properties']++;
   });
 
+  // ── Work Order Speed to Repair (AppFolio via Zapier) ─────────
+  // Fields: Work Order Number (title), Created at (date), Completion On (date), Speed to Repair (formula)
+  const workOrders = workOrderPages
+    .map(p => {
+      const wo      = g(p, 'Work Order Number', 'title');
+      const created = g(p, 'Created at', 'date');
+      const comp    = g(p, 'Completion On', 'date');
+      let days      = g(p, 'Speed to Repair', 'formula');
+      // Fallback: compute days in JS if the formula field isn't present or returns null
+      if ((days == null || isNaN(days)) && created && comp) {
+        days = Math.round((new Date(comp) - new Date(created)) / 86400000);
+      }
+      return { wo, created, comp, days };
+    })
+    .filter(w => w.wo);
+
+  const completedWOs    = workOrders.filter(w => w.comp && w.days != null && w.days >= 0);
+  const openWOs         = workOrders.filter(w => !w.comp);
+  const totalWOs        = workOrders.length;
+  const completedCt     = completedWOs.length;
+  const openCt          = openWOs.length;
+
+  const dayVals         = completedWOs.map(w => w.days);
+  const avgWODays       = dayVals.length ? +(dayVals.reduce((a,b)=>a+b,0)/dayVals.length).toFixed(1) : 0;
+  const sortedDays      = [...dayVals].sort((a,b)=>a-b);
+  const medianWODays    = sortedDays.length
+    ? (sortedDays.length % 2 === 1
+        ? sortedDays[(sortedDays.length-1)/2]
+        : +((sortedDays[sortedDays.length/2-1] + sortedDays[sortedDays.length/2]) / 2).toFixed(1))
+    : 0;
+  const maxWODays       = sortedDays.length ? sortedDays[sortedDays.length-1] : 0;
+  const minWODays       = sortedDays.length ? sortedDays[0] : 0;
+
+  // Distribution buckets (completed WOs only)
+  const woBuckets = {'0–3 days':0,'4–7 days':0,'8–14 days':0,'15–30 days':0,'31–60 days':0,'60+ days':0};
+  completedWOs.forEach(w => {
+    const d = w.days;
+    if      (d <= 3)  woBuckets['0–3 days']++;
+    else if (d <= 7)  woBuckets['4–7 days']++;
+    else if (d <= 14) woBuckets['8–14 days']++;
+    else if (d <= 30) woBuckets['15–30 days']++;
+    else if (d <= 60) woBuckets['31–60 days']++;
+    else              woBuckets['60+ days']++;
+  });
+
+  // Monthly trend: avg days grouped by completion month (past 12 months)
+  const woMonthBuckets = {};
+  const twelveMoAgoWO  = new Date(now); twelveMoAgoWO.setFullYear(now.getFullYear()-1);
+  completedWOs.forEach(w => {
+    const d = new Date(w.comp);
+    if (d < twelveMoAgoWO) return;
+    const mk  = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    const lbl = d.toLocaleString('en-US',{month:'short',year:'2-digit'});
+    woMonthBuckets[mk] = woMonthBuckets[mk] || {sum:0,n:0,lbl};
+    woMonthBuckets[mk].sum += w.days; woMonthBuckets[mk].n++;
+  });
+  const woMonthKeys   = Object.keys(woMonthBuckets).sort();
+  const woMonthLabels = woMonthKeys.map(k => woMonthBuckets[k].lbl);
+  const woMonthAvg    = woMonthKeys.map(k => +(woMonthBuckets[k].sum/woMonthBuckets[k].n).toFixed(1));
+  const woMonthCount  = woMonthKeys.map(k => woMonthBuckets[k].n);
+
+  // Most recently completed work orders (top 20)
+  const recentWOs = [...completedWOs]
+    .sort((a,b) => new Date(b.comp) - new Date(a.comp))
+    .slice(0, 20)
+    .map(w => ({
+      wo:      w.wo,
+      created: w.created,
+      comp:    w.comp,
+      days:    w.days,
+    }));
+
+  // Slowest 10 (longest days to repair)
+  const slowestWOs = [...completedWOs]
+    .sort((a,b) => b.days - a.days)
+    .slice(0, 10)
+    .map(w => ({ wo: w.wo, created: w.created, comp: w.comp, days: w.days }));
+
+  const latestWOMonthLbl = woMonthLabels[woMonthLabels.length-1] || '';
+  const latestWOMonthAvg = woMonthAvg[woMonthAvg.length-1]       || 0;
+
   // ── Timestamp ─────────────────────────────────────────────
   const updatedAt = new Date().toLocaleString('en-US',{
     timeZone:'America/Boise',
@@ -344,6 +430,13 @@ function computeMetrics(rentalPages, weeklyPages, monthlyPages, dworPages, owner
     speedLabels, speedVals, turnLabels, turnVals, openLabels, openVals,
     dworLabels, dworMR, dworTrn, ownerDist,
     owners:{ totalOwners, inactiveOwners: inactiveOwners.length, avgMRDays, avgTrnDays, makeReadyCt: makeReadys.length, turnoverCt: turnovers.length },
+    wo:{
+      totalWOs, completedCt, openCt,
+      avgWODays, medianWODays, maxWODays, minWODays,
+      woBuckets, woMonthLabels, woMonthAvg, woMonthCount,
+      recentWOs, slowestWOs,
+      latestWOMonthLbl, latestWOMonthAvg,
+    },
     meta:{
       latestSpeed, latestTurn, latestSpeedLbl, latestTurnLbl,
       latestOpenWO, latestOpenDate, latestWeekDate, salesCR, latestDOM,
@@ -430,6 +523,36 @@ function generateHTML(D) {
     kpi('red',   'Avg Turnover Days',      D.owners.avgTrnDays,         'Average DWOR days · Turnover'),
   ].join('');
 
+  const woKPIs = [
+    kpi('blue',  'Avg Days to Complete', D.wo.avgWODays,  `${D.wo.completedCt} completed work orders`),
+    kpi('teal',  'Median Days',          D.wo.medianWODays, 'Middle value · completed WOs'),
+    kpi('navy',  'Total Work Orders',    D.wo.totalWOs,   `${D.wo.completedCt} completed · ${D.wo.openCt} open`),
+    kpi('orange','Longest Repair',       D.wo.maxWODays+' d', 'Days from created to completed'),
+    kpi('green', 'Fastest Repair',       D.wo.minWODays+' d', 'Days from created to completed'),
+    kpi('purple','Latest Month Avg',     D.wo.latestWOMonthAvg+' d', `${D.wo.latestWOMonthLbl || '—'} · avg days to complete`),
+  ].join('');
+
+  // Pre-render the recent/slowest WO rows (keeps HTML & JS decoupled from data)
+  const fmtDate = s => {
+    if (!s) return '—';
+    const d = new Date(s);
+    return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  };
+  const recentWORows = D.wo.recentWOs.map(w => `
+    <tr>
+      <td style="font-weight:600;color:var(--primary)">${w.wo}</td>
+      <td>${fmtDate(w.created)}</td>
+      <td>${fmtDate(w.comp)}</td>
+      <td style="font-weight:700;color:${w.days>30?'var(--red)':w.days>14?'var(--orange)':'var(--green)'}">${w.days} d</td>
+    </tr>`).join('');
+  const slowestWORows = D.wo.slowestWOs.map(w => `
+    <tr>
+      <td style="font-weight:600;color:var(--primary)">${w.wo}</td>
+      <td>${fmtDate(w.created)}</td>
+      <td>${fmtDate(w.comp)}</td>
+      <td style="font-weight:700;color:var(--red)">${w.days} d</td>
+    </tr>`).join('');
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -512,6 +635,7 @@ function generateHTML(D) {
   <div class="tab" onclick="showTab(1)">Operations &amp; Maintenance</div>
   <div class="tab" onclick="showTab(2)">Property Details</div>
   <div class="tab" onclick="showTab(3)">Owners &amp; DWOR</div>
+  <div class="tab" onclick="showTab(4)">Work Order Speed</div>
 </div>
 
 <div class="container">
@@ -608,6 +732,58 @@ function generateHTML(D) {
   </div>
 </div>
 
+<!-- TAB 4 — Work Order Speed to Repair Completion -->
+<div class="section" id="tab4">
+  <div class="sec-title">⏱️ Work Order Speed to Repair Completion
+    <span class="sec-badge">AppFolio Report · Weekly CSV via Zapier · Live from Notion</span>
+  </div>
+  <div class="kpi-grid">${woKPIs}</div>
+
+  <div class="grid">
+    <div class="card c7">
+      <div class="ct">Avg Days to Complete by Month</div>
+      <div class="cs">Grouped by completion month · past 12 months</div>
+      <canvas id="woMonthChart" height="230"></canvas>
+    </div>
+    <div class="card c5">
+      <div class="ct">Completion Speed Distribution</div>
+      <div class="cs">All completed work orders · bucketed by days</div>
+      <canvas id="woBucketChart" height="230"></canvas>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card c12">
+      <div class="ct">Work Orders Completed per Month</div>
+      <div class="cs">Throughput · past 12 months</div>
+      <canvas id="woVolumeChart" height="200"></canvas>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card c7">
+      <div class="ct">Most Recent Completed Work Orders</div>
+      <div class="cs">Last 20 completed · newest first</div>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Work Order #</th><th>Created</th><th>Completed</th><th>Days</th></tr></thead>
+          <tbody>${recentWORows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card c5">
+      <div class="ct">Slowest 10 Work Orders</div>
+      <div class="cs">Longest time from creation to completion</div>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Work Order #</th><th>Created</th><th>Completed</th><th>Days</th></tr></thead>
+          <tbody>${slowestWORows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div>
 
 <script>
@@ -660,6 +836,11 @@ D.topProps.forEach((p,i)=>{tb.innerHTML+=\`<tr><td style="color:var(--muted);fon
 donut('ownerDistChart',Object.keys(D.ownerDist),Object.values(D.ownerDist),['#1e3a5f','#2e7d9e','#27ae60','#e67e22']);
 vbar('dworAvgChart',['Make Ready','Turnover'],[D.owners.avgMRDays,D.owners.avgTrnDays],['#2e7d9e','#e67e22'],{suf:' days'});
 donut('ownerStatusChart',['Active','Inactive'],[D.owners.totalOwners,D.owners.inactiveOwners],['#27ae60','#e2e8f0']);
+
+// Tab 4 — Work Order Speed to Repair Completion
+line('woMonthChart',D.wo.woMonthLabels,[{label:'Avg Days to Complete',data:D.wo.woMonthAvg,color:'#2e7d9e',fill:true}],{suf:' d',yMin:0,yFmt:v=>v+' d'});
+vbar('woBucketChart',Object.keys(D.wo.woBuckets),Object.values(D.wo.woBuckets),['#27ae60','#52c17a','#f39c12','#e67e22','#c0392b','#7b241c'],{suf:' WOs'});
+vbar('woVolumeChart',D.wo.woMonthLabels,D.wo.woMonthCount,D.wo.woMonthLabels.map((_,i)=>PAL.mixed[i%PAL.mixed.length]),{suf:' WOs'});
 <\/script>
 </body>
 </html>`;
